@@ -1,0 +1,12 @@
+[package]
+name = "paya"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ash = { git = "https://github.com/ash-rs/ash", branch = "rwh-0.6" }
+ash-window = { git = "https://github.com/ash-rs/ash", branch = "rwh-0.6" }
+bitflags = "2.4.2"
+petgraph = "0.6.4"
+raw-window-handle = "0.6.0"
+slotmap = "1.0.7"

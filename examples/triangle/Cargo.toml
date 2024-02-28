@@ -1,0 +1,8 @@
+[package]
+name = "triangle"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+paya = { path = "../../paya" }
+winit =  "0.29.10"
