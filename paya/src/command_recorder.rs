@@ -1,17 +1,20 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use ash::vk;
 
 use crate::{
-    common::ImageTransition,
+    common::{BufferTransition, ImageTransition},
     device::{Device, DeviceInner},
-    gpu_resources::ImageId,
+    gpu_resources::{BufferId, ImageId},
     pipeline::ComputePipeline,
 };
 
+#[derive(Clone)]
 pub struct CommandList {
+    pub(crate) id: CommandRecorderId,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
+    pub(crate) deferred_delete_buffers: Vec<BufferId>,
 }
 
 impl CommandList {
@@ -20,52 +23,132 @@ impl CommandList {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CommandRecorderId(u32);
+
+pub struct CommandRecorderPool {
+    device_dep: Arc<DeviceInner>,
+    recorders: Vec<CommandRecorder>,
+    free_recorders: Vec<CommandRecorderId>,
+}
+
+impl CommandRecorderPool {
+    pub(crate) fn new(device_dep: Arc<DeviceInner>) -> Self {
+        Self {
+            device_dep,
+            recorders: Vec::new(),
+            free_recorders: Vec::new(),
+        }
+    }
+
+    pub(crate) fn create_command_recorder(&mut self) -> CommandRecorder {
+        if self.free_recorders.is_empty() {
+            let id = CommandRecorderId(self.recorders.len() as u32);
+            self.recorders
+                .push(CommandRecorder::new(self.device_dep.clone(), id));
+            self.free_recorders.push(id);
+        }
+
+        let recorder_id = self
+            .free_recorders
+            .pop()
+            .expect("Failed to create a command recorder");
+
+        self.get_recorder(recorder_id).clone()
+    }
+
+    pub(crate) fn free_command_recorder(&mut self, id: CommandRecorderId) {
+        self.get_recorder(id).reset();
+        self.free_recorders.push(id);
+    }
+
+    fn get_recorder(&self, id: CommandRecorderId) -> &CommandRecorder {
+        &self.recorders[id.0 as usize]
+    }
+}
+
+impl Drop for CommandRecorderPool {
+    fn drop(&mut self) {
+        unsafe { self.device_dep.device.device_wait_idle() }.expect("Faile dto wait for device");
+        for recorder in &self.recorders {
+            unsafe {
+                self.device_dep
+                    .device
+                    .destroy_command_pool(recorder.pool, None)
+            };
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct CommandRecorder {
     device_dep: Arc<DeviceInner>,
+    id: CommandRecorderId,
     pool: vk::CommandPool,
     current_command_list: CommandList,
 }
 
 impl CommandRecorder {
-    pub(crate) fn new(device: &Device) -> Self {
+    pub(crate) fn new(device_dep: Arc<DeviceInner>, id: CommandRecorderId) -> Self {
         let command_pool_create_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(device.main_queue_family_index())
+            .queue_family_index(device_dep.main_queue_family_index)
             .flags(vk::CommandPoolCreateFlags::TRANSIENT);
         let command_pool = unsafe {
-            device
-                .handle()
+            device_dep
+                .device
                 .create_command_pool(&command_pool_create_info, None)
                 .unwrap()
         };
 
         let mut s = CommandRecorder {
-            device_dep: device.create_dep(),
+            device_dep,
             pool: command_pool,
+            id,
             current_command_list: CommandList {
+                deferred_delete_buffers: Vec::new(),
+                id,
                 command_pool,
                 command_buffer: vk::CommandBuffer::null(),
             },
         };
 
-        s.new_command_list(device);
+        s.new_command_list();
         s
     }
 
-    fn new_command_list(&mut self, device: &Device) {
+    fn reset(&self) {
+        unsafe {
+            self.device_dep
+                .device
+                .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
+        }
+        .expect("Couldnt reset command pool");
+
+        unsafe {
+            self.device_dep.device.begin_command_buffer(
+                self.current_command_list.command_buffer,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+        }
+        .expect("Couldnt reset and re begin command buffer");
+    }
+
+    fn new_command_list(&mut self) {
         let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         let command_buffer = unsafe {
-            device
-                .handle()
+            self.device_dep
+                .device
                 .allocate_command_buffers(&command_buffer_allocate_info)
                 .unwrap()[0]
         };
 
         unsafe {
-            device
-                .handle()
+            self.device_dep
+                .device
                 .begin_command_buffer(
                     command_buffer,
                     &vk::CommandBufferBeginInfo::default()
@@ -75,9 +158,15 @@ impl CommandRecorder {
         }
 
         self.current_command_list = CommandList {
+            deferred_delete_buffers: Vec::new(),
+            id: self.id,
             command_pool: self.pool,
             command_buffer,
         };
+    }
+
+    pub fn destroy_buffer_deferred(&mut self, id: BufferId) {
+        self.current_command_list.deferred_delete_buffers.push(id);
     }
 
     pub fn clear_color_image(
@@ -106,6 +195,26 @@ impl CommandRecorder {
                 &clear_color,
                 &[image_subresource_range],
             );
+        }
+    }
+
+    pub fn copy_buffer_to_buffer(
+        &mut self,
+        device: &Device,
+        src: BufferId,
+        dst: BufferId,
+        size: u64,
+    ) {
+        let src_buffer = device.get_buffer(src);
+        let dst_buffer = device.get_buffer(dst);
+
+        unsafe {
+            device.handle().cmd_copy_buffer(
+                self.current_command_list.handle(),
+                src_buffer.handle,
+                dst_buffer.handle,
+                &[vk::BufferCopy::default().size(size)],
+            )
         }
     }
 
@@ -153,6 +262,31 @@ impl CommandRecorder {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &[region],
                 vk::Filter::LINEAR,
+            );
+        }
+    }
+
+    pub fn pipeline_barrier_buffer_transition(
+        &mut self,
+        device: &Device,
+        transition: BufferTransition,
+    ) {
+        let buffer = device.get_buffer(transition.buffer);
+
+        let barrier = vk::BufferMemoryBarrier::default()
+            .buffer(buffer.handle)
+            .size(buffer.size)
+            .offset(0);
+
+        unsafe {
+            device.handle().cmd_pipeline_barrier(
+                self.current_command_list.command_buffer,
+                transition.src_access.vk_stages(),
+                transition.dst_access.vk_stages(),
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
             );
         }
     }

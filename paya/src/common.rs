@@ -1,7 +1,7 @@
 use ash::vk;
 use bitflags::bitflags;
 
-use crate::gpu_resources::ImageId;
+use crate::gpu_resources::{BufferId, ImageId};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Format {
@@ -172,6 +172,22 @@ impl Into<vk::ImageUsageFlags> for ImageUsageFlags {
     }
 }
 
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct BufferUsageFlags: u32 {
+        const UNIFORM = vk::BufferUsageFlags::UNIFORM_BUFFER.as_raw();
+        const STORAGE = vk::BufferUsageFlags::STORAGE_BUFFER.as_raw();
+        const TRANSFER_SRC = vk::BufferUsageFlags::TRANSFER_SRC.as_raw();
+        const TRANSFER_DST = vk::BufferUsageFlags::TRANSFER_DST.as_raw();
+    }
+}
+
+impl Into<vk::BufferUsageFlags> for BufferUsageFlags {
+    fn into(self) -> vk::BufferUsageFlags {
+        vk::BufferUsageFlags::from_raw(self.bits())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ImageLayout {
     Undefined,
@@ -293,6 +309,12 @@ pub struct ImageTransition {
     pub image: ImageId,
     pub src_layout: ImageLayout,
     pub dst_layout: ImageLayout,
+    pub src_access: AccessFlags,
+    pub dst_access: AccessFlags,
+}
+
+pub struct BufferTransition {
+    pub buffer: BufferId,
     pub src_access: AccessFlags,
     pub dst_access: AccessFlags,
 }

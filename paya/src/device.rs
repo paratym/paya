@@ -5,9 +5,11 @@ use slotmap::{new_key_type, SlotMap};
 
 use crate::{
     allocator::{Allocation, GpuAllocator},
-    command_recorder::{CommandList, CommandRecorder},
+    command_recorder::{CommandList, CommandRecorder, CommandRecorderId, CommandRecorderPool},
     common::{Extent3D, Format, ImageUsageFlags},
-    gpu_resources::{GpuResourceId, GpuResourcePool, GpuResourceType, ImageId},
+    gpu_resources::{
+        Buffer, BufferId, BufferInfo, GpuResourceId, GpuResourcePool, GpuResourceType, ImageId,
+    },
     instance::{Instance, InstanceInner},
     pipeline::{ComputePipeline, ComputePipelineInfo, PipelineInner},
     swapchain::{Swapchain, SwapchainCreateInfo},
@@ -45,6 +47,7 @@ pub enum DeviceType {
 pub struct DeviceInner {
     pub(crate) instance_dep: Arc<InstanceInner>,
     pub(crate) device: ash::Device,
+    pub(crate) main_queue_family_index: u32,
     pub(crate) physical_device: vk::PhysicalDevice,
     pub(crate) physical_device_properties: vk::PhysicalDeviceProperties,
     pub(crate) physical_device_memory_properties: vk::PhysicalDeviceMemoryProperties,
@@ -55,13 +58,14 @@ pub struct Device {
     inner: Arc<DeviceInner>,
 
     main_queue: vk::Queue,
-    main_queue_family_index: u32,
 
     pub(crate) gpu_resources: GpuResourcePool,
+    command_recorder_pool: CommandRecorderPool,
 
-    deferred_destruct_recorders: HashMap<u32, Vec<CommandList>>,
+    deferred_destruct_recorders: HashMap<u64, Vec<CommandRecorderId>>,
+    deferred_destruct_buffers: HashMap<u64, Vec<BufferId>>,
 
-    frame_index: u32,
+    frame_index: u64,
 }
 
 impl Device {
@@ -107,14 +111,16 @@ impl Device {
         let device_extensions = vec![ash::extensions::khr::Swapchain::NAME.as_ptr()];
 
         let mut descriptor_indexing_features =
-            vk::PhysicalDeviceDescriptorIndexingFeaturesEXT::default();
-
+            vk::PhysicalDeviceDescriptorIndexingFeatures::default();
         let mut timeline_semaphore_features =
             vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
+        let mut buffer_device_address_features =
+            vk::PhysicalDeviceBufferDeviceAddressFeatures::default();
 
         let mut device_features = vk::PhysicalDeviceFeatures2::default()
             .push_next(&mut descriptor_indexing_features)
-            .push_next(&mut timeline_semaphore_features);
+            .push_next(&mut timeline_semaphore_features)
+            .push_next(&mut buffer_device_address_features);
 
         unsafe {
             instance
@@ -140,6 +146,7 @@ impl Device {
         let inner_device = DeviceInner {
             instance_dep: instance.create_dep(),
             device,
+            main_queue_family_index,
             physical_device,
             physical_device_properties,
             physical_device_memory_properties,
@@ -151,11 +158,12 @@ impl Device {
         let gpu_resources = GpuResourcePool::new(device_dep.clone());
 
         Device {
-            inner: device_dep,
+            inner: device_dep.clone(),
             main_queue,
-            main_queue_family_index,
             gpu_resources,
+            command_recorder_pool: CommandRecorderPool::new(device_dep.clone()),
             deferred_destruct_recorders,
+            deferred_destruct_buffers: HashMap::new(),
             frame_index: 0,
         }
     }
@@ -180,13 +188,43 @@ impl Device {
         self.gpu_resources.get_image(id)
     }
 
-    pub fn get_storage_image_resource_id(&self, id: ImageId) -> GpuResourceId {
-        self.gpu_resources
-            .create_gpu_id(id.0, GpuResourceType::StorageImage)
+    pub fn destroy_image(&mut self, id: ImageId) {
+        self.gpu_resources.destroy_image(id);
     }
 
-    pub fn create_command_recorder(&self) -> CommandRecorder {
-        CommandRecorder::new(self)
+    pub fn create_buffer(&mut self, info: BufferInfo) -> BufferId {
+        self.gpu_resources.create_buffer(&info)
+    }
+
+    pub fn get_buffer(&self, id: BufferId) -> &Buffer {
+        self.gpu_resources.get_buffer(id)
+    }
+
+    pub fn destroy_buffer(&mut self, id: BufferId) {
+        self.gpu_resources.destroy_buffer(id);
+    }
+
+    pub fn map_buffer_typed<T>(&self, id: BufferId) -> TypedMappedPtr<'_, T> {
+        let buffer = self.gpu_resources.get_buffer(id);
+        let ptr = unsafe {
+            self.handle().map_memory(
+                buffer.allocation.memory,
+                buffer.allocation.offset,
+                buffer.size,
+                vk::MemoryMapFlags::empty(),
+            )
+        }
+        .expect("Failed to map typed buf memory");
+
+        TypedMappedPtr {
+            ptr: ptr as *mut T,
+            device: self,
+            memory: buffer.allocation.memory,
+        }
+    }
+
+    pub fn create_command_recorder(&mut self) -> CommandRecorder {
+        self.command_recorder_pool.create_command_recorder()
     }
 
     pub fn submit(&mut self, info: SubmitInfo) {
@@ -224,9 +262,18 @@ impl Device {
             .signal_semaphores(&signal_semaphores);
 
         self.deferred_destruct_recorders
-            .entry(self.frame_index)
+            .entry(self.frame_index + 1)
             .or_default()
-            .extend(info.commands);
+            .extend(info.commands.iter().map(|list| list.id));
+
+        self.deferred_destruct_buffers
+            .entry(self.frame_index + 1)
+            .or_default()
+            .extend(
+                info.commands
+                    .iter()
+                    .flat_map(|list| list.deferred_delete_buffers.clone()),
+            );
 
         unsafe {
             self.handle()
@@ -257,6 +304,34 @@ impl Device {
                 .loader()
                 .queue_present(self.main_queue, &present_info)
                 .expect("Failed to present queue");
+        }
+    }
+
+    pub fn collect_garbage(&mut self, timeline_semaphore: &TimelineSemaphore) {
+        let gpu_count = unsafe {
+            self.handle()
+                .get_semaphore_counter_value(timeline_semaphore.handle())
+        }
+        .expect("Couldn't get semaphore value");
+
+        for recorder_id in self
+            .deferred_destruct_recorders
+            .get_mut(&gpu_count)
+            .unwrap_or(&mut Vec::new())
+            .drain(0..)
+        {
+            self.command_recorder_pool
+                .free_command_recorder(recorder_id);
+        }
+
+        for buffer_id in self
+            .deferred_destruct_buffers
+            .get_mut(&gpu_count)
+            .unwrap_or(&mut Vec::new())
+            .drain(0..)
+            .collect::<Vec<_>>()
+        {
+            self.destroy_buffer(buffer_id);
         }
     }
 
@@ -324,7 +399,7 @@ impl Device {
         }
     }
 
-    pub fn cpu_frame_index(&self) -> u32 {
+    pub fn cpu_frame_index(&self) -> u64 {
         self.frame_index
     }
 
@@ -349,7 +424,7 @@ impl Device {
     }
 
     pub fn main_queue_family_index(&self) -> u32 {
-        self.main_queue_family_index
+        self.inner.main_queue_family_index
     }
 
     fn create_descriptor_pool(device_inner: &DeviceInner) -> vk::DescriptorPool {
@@ -480,6 +555,7 @@ pub struct Image {
     pub view: Option<vk::ImageView>,
     pub info: ImageInfo,
     pub allocation: Option<Allocation>,
+    pub is_swapchain_image: bool,
 }
 
 pub struct SubmitInfo<'a> {
@@ -492,4 +568,42 @@ pub struct SubmitInfo<'a> {
 pub struct PresentInfo<'a> {
     pub swapchain: &'a Swapchain,
     pub wait_semaphores: Vec<&'a BinarySemaphore>,
+}
+
+pub struct TypedMappedPtr<'a, T> {
+    ptr: *mut T,
+    memory: vk::DeviceMemory,
+    device: &'a Device,
+}
+
+impl<T> std::ops::Deref for TypedMappedPtr<'_, T> {
+    type Target = *mut T;
+    fn deref(&self) -> &Self::Target {
+        &self.ptr
+    }
+}
+
+impl<T> Drop for TypedMappedPtr<'_, T> {
+    fn drop(&mut self) {
+        unsafe { self.device.handle().unmap_memory(self.memory) };
+    }
+}
+
+pub struct MappedPtr<'a> {
+    ptr: *mut u8,
+    memory: vk::DeviceMemory,
+    device: &'a Device,
+}
+
+impl std::ops::Deref for MappedPtr<'_> {
+    type Target = *mut u8;
+    fn deref(&self) -> &Self::Target {
+        &self.ptr
+    }
+}
+
+impl Drop for MappedPtr<'_> {
+    fn drop(&mut self) {
+        unsafe { self.device.handle().unmap_memory(self.memory) };
+    }
 }
