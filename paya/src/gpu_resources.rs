@@ -434,8 +434,6 @@ impl GpuResourcePool {
             is_swapchain_image: existing_image.is_some(),
         });
 
-        println!("index: {:?}", index);
-
         if let Some(view) = view {
             let write_image_info = [vk::DescriptorImageInfo::default()
                 .image_layout(vk::ImageLayout::GENERAL)

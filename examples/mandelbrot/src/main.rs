@@ -81,7 +81,6 @@ fn main() {
                         return;
                     };
                     let image_extent = device.get_image(image).info.extent;
-                    println!("extent: {:?}", image_extent);
 
                     let mut recorder = device.create_command_recorder();
 

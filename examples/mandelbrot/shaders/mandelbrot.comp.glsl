@@ -31,7 +31,7 @@ void main() {
   vec2 c = vec2(ndc.x * 2.0 - 1.0, 1.0 - 2.0 * ndc.y);
   vec2 extent = vec2(push_constants.resolution);
   c.x *= (extent.x / extent.y);
-  c /= 50;
+  c /= push_constants.time * push_constants.time;
 
   c += ZOOM_COORD;
 
