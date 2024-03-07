@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    ffi::{c_void, CString},
+    sync::Arc,
+};
 
 use ash::{extensions::khr, vk};
 use slotmap::{new_key_type, SlotMap};
@@ -113,14 +117,18 @@ impl Device {
         let mut descriptor_indexing_features =
             vk::PhysicalDeviceDescriptorIndexingFeatures::default();
         let mut timeline_semaphore_features =
-            vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
+            vk::PhysicalDeviceTimelineSemaphoreFeatures::default().timeline_semaphore(true);
+        timeline_semaphore_features.p_next = &mut descriptor_indexing_features
+            as *mut vk::PhysicalDeviceDescriptorIndexingFeatures
+            as *mut c_void;
         let mut buffer_device_address_features =
-            vk::PhysicalDeviceBufferDeviceAddressFeatures::default();
+            vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
+        buffer_device_address_features.p_next = &mut timeline_semaphore_features
+            as *mut vk::PhysicalDeviceTimelineSemaphoreFeatures
+            as *mut c_void;
 
-        let mut device_features = vk::PhysicalDeviceFeatures2::default()
-            .push_next(&mut descriptor_indexing_features)
-            .push_next(&mut timeline_semaphore_features)
-            .push_next(&mut buffer_device_address_features);
+        let mut device_features =
+            vk::PhysicalDeviceFeatures2::default().push_next(&mut buffer_device_address_features);
 
         unsafe {
             instance

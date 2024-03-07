@@ -5,6 +5,8 @@ pub mod device;
 pub mod gpu_resources;
 pub mod instance;
 pub mod pipeline;
+pub mod preamble;
+pub mod shader;
 pub mod swapchain;
 pub mod sync;
 pub mod task_list;

@@ -28,7 +28,7 @@ impl Instance {
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(&app_name)
             .engine_version(vk::make_api_version(0, 1, 0, 0))
-            .api_version(vk::make_api_version(0, 1, 3, 0));
+            .api_version(vk::make_api_version(0, 1, 2, 0));
 
         let c_instance_extensions = vec![
             #[cfg(debug_assertions)]

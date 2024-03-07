@@ -217,6 +217,7 @@ impl Swapchain {
     }
 
     pub fn resize(&mut self, device: &mut Device, width: u32, height: u32) {
+        unsafe { device.handle().device_wait_idle() }.expect("Failed to idle device.");
         let (new_swapchain, images, info) = Self::create_swapchain(
             &self.device_dep,
             &self.swapchain_loader,

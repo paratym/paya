@@ -9,4 +9,9 @@ ash-window = { git = "https://github.com/ash-rs/ash", branch = "rwh-0.6" }
 bitflags = "2.4.2"
 petgraph = "0.6.4"
 raw-window-handle = "0.6.0"
+shaderc = "0.8.3"
+regex = "1.10.3"
 slotmap = "1.0.7"
+
+[features]
+render_manager = []

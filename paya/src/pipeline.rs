@@ -2,12 +2,10 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use crate::device::DeviceInner;
-
-pub struct ShaderInfo {
-    pub byte_code: Vec<u32>,
-    pub entry_point: String,
-}
+use crate::{
+    device::{Device, DeviceInner},
+    shader::ShaderInfo,
+};
 
 pub struct PipelineInner {
     pub(crate) pipeline: vk::Pipeline,
@@ -23,6 +21,8 @@ pub struct ComputePipeline {
     pub(crate) device_dep: Arc<DeviceInner>,
     pub(crate) inner: PipelineInner,
 }
+
+impl ComputePipeline {}
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {

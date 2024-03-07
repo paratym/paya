@@ -71,8 +71,11 @@ pub struct ResourceSlot<T> {
 impl<T> ResourceSlot<T> {
     fn new() -> Self {
         Self {
-            entries: Vec::new(),
-            free_head: usize::MAX,
+            entries: vec![ResourceVersionEntry {
+                entry: ResourceEntry::Free(usize::MAX),
+                version: 0,
+            }],
+            free_head: 0,
         }
     }
 
@@ -431,6 +434,8 @@ impl GpuResourcePool {
             is_swapchain_image: existing_image.is_some(),
         });
 
+        println!("index: {:?}", index);
+
         if let Some(view) = view {
             let write_image_info = [vk::DescriptorImageInfo::default()
                 .image_layout(vk::ImageLayout::GENERAL)
@@ -466,7 +471,9 @@ impl GpuResourcePool {
         if let Some(view) = image.view {
             unsafe { self.device_dep.device.destroy_image_view(view, None) };
         }
-        unsafe { self.device_dep.device.destroy_image(image.handle, None) };
+        if !image.is_swapchain_image {
+            unsafe { self.device_dep.device.destroy_image(image.handle, None) };
+        }
         if let Some(allocation) = image.allocation.clone() {
             self.allocator.deallocate_memory(allocation);
         }
@@ -542,9 +549,7 @@ impl Drop for GpuResourcePool {
     fn drop(&mut self) {
         unsafe { self.device_dep.device.device_wait_idle() }.expect("failed to idle");
         for image in self.images.collect_existing() {
-            if !image.is_swapchain_image {
-                self.destroy_image_raw(image);
-            }
+            self.destroy_image_raw(image);
         }
         for buffer in self.buffers.collect_existing() {
             self.destroy_buffer_raw(buffer);
