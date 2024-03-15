@@ -10,7 +10,7 @@ pub struct InstanceCreateInfo<'a> {
 pub struct InstanceInner {
     pub(crate) loader: ash::Entry,
     pub(crate) instance: ash::Instance,
-    debug_utils: ash::extensions::ext::DebugUtils,
+    pub(crate) debug_utils: ash::extensions::ext::DebugUtils,
     debug_utils_messenger: vk::DebugUtilsMessengerEXT,
 }
 

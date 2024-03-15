@@ -179,6 +179,9 @@ bitflags! {
         const STORAGE = vk::BufferUsageFlags::STORAGE_BUFFER.as_raw();
         const TRANSFER_SRC = vk::BufferUsageFlags::TRANSFER_SRC.as_raw();
         const TRANSFER_DST = vk::BufferUsageFlags::TRANSFER_DST.as_raw();
+        const INDEX = vk::BufferUsageFlags::INDEX_BUFFER.as_raw();
+        const VERTEX = vk::BufferUsageFlags::VERTEX_BUFFER.as_raw();
+        const INDIRECT = vk::BufferUsageFlags::INDIRECT_BUFFER.as_raw();
     }
 }
 
@@ -317,4 +320,87 @@ pub struct BufferTransition {
     pub buffer: BufferId,
     pub src_access: AccessFlags,
     pub dst_access: AccessFlags,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PolygonMode {
+    Line,
+    Fill,
+}
+
+impl Into<vk::PolygonMode> for PolygonMode {
+    fn into(self) -> vk::PolygonMode {
+        match self {
+            PolygonMode::Line => vk::PolygonMode::LINE,
+            PolygonMode::Fill => vk::PolygonMode::FILL,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AttachmentLoadOp {
+    Undefined,
+    Clear,
+    Store,
+}
+
+impl Into<vk::AttachmentLoadOp> for AttachmentLoadOp {
+    fn into(self) -> vk::AttachmentLoadOp {
+        match self {
+            AttachmentLoadOp::Undefined => vk::AttachmentLoadOp::DONT_CARE,
+            AttachmentLoadOp::Clear => vk::AttachmentLoadOp::CLEAR,
+            AttachmentLoadOp::Store => vk::AttachmentLoadOp::LOAD,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AttachmentStoreOp {
+    Undefined,
+    Store,
+}
+
+impl Into<vk::AttachmentStoreOp> for AttachmentStoreOp {
+    fn into(self) -> vk::AttachmentStoreOp {
+        match self {
+            AttachmentStoreOp::Undefined => vk::AttachmentStoreOp::DONT_CARE,
+            AttachmentStoreOp::Store => vk::AttachmentStoreOp::STORE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ClearValue {
+    None,
+    Color(f32, f32, f32),
+    Depth(f32),
+}
+
+impl Into<vk::ClearValue> for ClearValue {
+    fn into(self) -> vk::ClearValue {
+        match self {
+            ClearValue::Color(r, g, b) => vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [r, g, b, 1.0],
+                },
+            },
+            ClearValue::Depth(depth) => vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue { depth, stencil: 0 },
+            },
+            ClearValue::None => vk::ClearValue::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Topology {
+    TriangleList,
+}
+
+impl Into<vk::PrimitiveTopology> for Topology {
+    fn into(self) -> vk::PrimitiveTopology {
+        match self {
+            Topology::TriangleList => vk::PrimitiveTopology::TRIANGLE_LIST,
+        }
+    }
 }

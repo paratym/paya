@@ -217,7 +217,6 @@ impl Swapchain {
     }
 
     pub fn resize(&mut self, device: &mut Device, width: u32, height: u32) {
-        unsafe { device.handle().device_wait_idle() }.expect("Failed to idle device.");
         let (new_swapchain, images, info) = Self::create_swapchain(
             &self.device_dep,
             &self.swapchain_loader,
@@ -278,7 +277,7 @@ impl Swapchain {
         let result = unsafe {
             self.swapchain_loader.acquire_next_image(
                 self.swapchain,
-                u64::MAX,
+                5e+9 as u64,
                 acquire_semaphore.handle(),
                 vk::Fence::null(),
             )

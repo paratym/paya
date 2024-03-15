@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ffi::CString, sync::Arc};
 
 use ash::vk::{self};
 
@@ -208,6 +208,7 @@ impl GpuResourcePool {
 
         let buffer_addresses_buffer = {
             let info = BufferInfo {
+                name: "paya_buffer_addresses_buffer".to_owned(),
                 size: MAX_BUFFERS * std::mem::size_of::<u64>() as u64,
                 memory_flags: MemoryFlags::DEVICE_LOCAL | MemoryFlags::HOST_VISIBLE,
                 usage: BufferUsageFlags::STORAGE,
@@ -489,6 +490,18 @@ impl GpuResourcePool {
         }
         .expect("Failed to make the buffer lol");
 
+        let c_string_name = CString::new(info.name.clone()).unwrap();
+        let name_info = vk::DebugUtilsObjectNameInfoEXT::default()
+            .object_handle(buffer)
+            .object_name(&c_string_name);
+        unsafe {
+            let _ = self
+                .device_dep
+                .instance_dep
+                .debug_utils
+                .set_debug_utils_object_name(self.device_dep.device.handle(), &name_info);
+        }
+
         let memory_requirements = unsafe {
             self.device_dep
                 .device
@@ -569,6 +582,7 @@ impl Drop for GpuResourcePool {
 
 #[derive(Clone, Debug)]
 pub struct BufferInfo {
+    pub name: String,
     pub size: u64,
     pub memory_flags: MemoryFlags,
     pub usage: BufferUsageFlags,

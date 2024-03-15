@@ -4,7 +4,10 @@ use std::{
     sync::Arc,
 };
 
-use ash::{extensions::khr, vk};
+use ash::{
+    extensions::khr::{self, DynamicRendering},
+    vk,
+};
 use slotmap::{new_key_type, SlotMap};
 
 use crate::{
@@ -15,7 +18,9 @@ use crate::{
         Buffer, BufferId, BufferInfo, GpuResourceId, GpuResourcePool, GpuResourceType, ImageId,
     },
     instance::{Instance, InstanceInner},
-    pipeline::{ComputePipeline, ComputePipelineInfo, PipelineInner},
+    pipeline::{
+        ComputePipeline, ComputePipelineInfo, PipelineInner, RasterPipeline, RasterPipelineInfo,
+    },
     swapchain::{Swapchain, SwapchainCreateInfo},
     sync::{BinarySemaphore, TimelineSemaphore},
 };
@@ -55,6 +60,7 @@ pub struct DeviceInner {
     pub(crate) physical_device: vk::PhysicalDevice,
     pub(crate) physical_device_properties: vk::PhysicalDeviceProperties,
     pub(crate) physical_device_memory_properties: vk::PhysicalDeviceMemoryProperties,
+    pub(crate) dynamic_rendering_loader: DynamicRendering,
 }
 
 pub struct Device {
@@ -68,6 +74,7 @@ pub struct Device {
 
     deferred_destruct_recorders: HashMap<u64, Vec<CommandRecorderId>>,
     deferred_destruct_buffers: HashMap<u64, Vec<BufferId>>,
+    deferred_destruct_images: HashMap<u64, Vec<ImageId>>,
 
     frame_index: u64,
 }
@@ -112,20 +119,28 @@ impl Device {
             .queue_family_index(0)
             .queue_priorities(&[1.0])];
 
-        let device_extensions = vec![ash::extensions::khr::Swapchain::NAME.as_ptr()];
+        let shader_non_semantic_info_c_string =
+            CString::new("VK_KHR_shader_non_semantic_info").unwrap();
+        let device_extensions = vec![
+            ash::extensions::khr::Swapchain::NAME.as_ptr(),
+            ash::extensions::khr::DynamicRendering::NAME.as_ptr(),
+            shader_non_semantic_info_c_string.as_ptr(),
+        ];
 
+        let mut dynamic_rendering_features =
+            vk::PhysicalDeviceDynamicRenderingFeaturesKHR::default().dynamic_rendering(true);
         let mut descriptor_indexing_features =
             vk::PhysicalDeviceDescriptorIndexingFeatures::default();
+        descriptor_indexing_features.p_next =
+            &mut dynamic_rendering_features as *mut _ as *mut c_void;
         let mut timeline_semaphore_features =
             vk::PhysicalDeviceTimelineSemaphoreFeatures::default().timeline_semaphore(true);
-        timeline_semaphore_features.p_next = &mut descriptor_indexing_features
-            as *mut vk::PhysicalDeviceDescriptorIndexingFeatures
-            as *mut c_void;
+        timeline_semaphore_features.p_next =
+            &mut descriptor_indexing_features as *mut _ as *mut c_void;
         let mut buffer_device_address_features =
             vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
-        buffer_device_address_features.p_next = &mut timeline_semaphore_features
-            as *mut vk::PhysicalDeviceTimelineSemaphoreFeatures
-            as *mut c_void;
+        buffer_device_address_features.p_next =
+            &mut timeline_semaphore_features as *mut _ as *mut c_void;
 
         let mut device_features =
             vk::PhysicalDeviceFeatures2::default().push_next(&mut buffer_device_address_features);
@@ -148,6 +163,8 @@ impl Device {
                 .expect("Failed to create logical device")
         };
 
+        let dynamic_rendering_loader = DynamicRendering::new(unsafe { instance.handle() }, &device);
+
         let main_queue = unsafe { device.get_device_queue(0, 0) };
         let main_queue_family_index = 0;
 
@@ -158,6 +175,7 @@ impl Device {
             physical_device,
             physical_device_properties,
             physical_device_memory_properties,
+            dynamic_rendering_loader,
         };
 
         let deferred_destruct_recorders = HashMap::new();
@@ -172,6 +190,7 @@ impl Device {
             command_recorder_pool: CommandRecorderPool::new(device_dep.clone()),
             deferred_destruct_recorders,
             deferred_destruct_buffers: HashMap::new(),
+            deferred_destruct_images: HashMap::new(),
             frame_index: 0,
         }
     }
@@ -200,6 +219,13 @@ impl Device {
         self.gpu_resources.destroy_image(id);
     }
 
+    pub fn destroy_image_deferred(&mut self, id: ImageId) {
+        self.deferred_destruct_images
+            .entry(self.frame_index + 1)
+            .or_default()
+            .push(id);
+    }
+
     pub fn create_buffer(&mut self, info: BufferInfo) -> BufferId {
         self.gpu_resources.create_buffer(&info)
     }
@@ -210,6 +236,13 @@ impl Device {
 
     pub fn destroy_buffer(&mut self, id: BufferId) {
         self.gpu_resources.destroy_buffer(id);
+    }
+
+    pub fn destroy_buffer_deferred(&mut self, id: BufferId) {
+        self.deferred_destruct_buffers
+            .entry(self.frame_index + 1)
+            .or_default()
+            .push(id);
     }
 
     pub fn map_buffer_typed<T>(&self, id: BufferId) -> TypedMappedPtr<'_, T> {
@@ -322,24 +355,201 @@ impl Device {
         }
         .expect("Couldn't get semaphore value");
 
-        for recorder_id in self
-            .deferred_destruct_recorders
-            .get_mut(&gpu_count)
-            .unwrap_or(&mut Vec::new())
-            .drain(0..)
-        {
-            self.command_recorder_pool
-                .free_command_recorder(recorder_id);
+        // TODO Fix this later
+        for i in 0..(3) {
+            let index = (gpu_count as i64 - i).max(0) as u64;
+
+            for recorder_id in self
+                .deferred_destruct_recorders
+                .get_mut(&index)
+                .unwrap_or(&mut Vec::new())
+                .drain(0..)
+            {
+                self.command_recorder_pool
+                    .free_command_recorder(recorder_id);
+            }
+
+            for buffer_id in self
+                .deferred_destruct_buffers
+                .get_mut(&index)
+                .unwrap_or(&mut Vec::new())
+                .drain(0..)
+                .collect::<Vec<_>>()
+            {
+                self.destroy_buffer(buffer_id);
+            }
+
+            for image_id in self
+                .deferred_destruct_images
+                .get_mut(&index)
+                .unwrap_or(&mut Vec::new())
+                .drain(0..)
+                .collect::<Vec<_>>()
+            {
+                self.destroy_image(image_id);
+            }
+        }
+    }
+
+    pub fn create_raster_pipeline(&self, info: RasterPipelineInfo) -> RasterPipeline {
+        let vertex_shader_module_create_info =
+            vk::ShaderModuleCreateInfo::default().code(info.vertex_shader.byte_code.as_slice());
+        let fragment_shader_module_create_info =
+            vk::ShaderModuleCreateInfo::default().code(info.fragment_shader.byte_code.as_slice());
+
+        let vertex_shader_module = unsafe {
+            self.handle()
+                .create_shader_module(&vertex_shader_module_create_info, None)
+        }
+        .unwrap();
+        let fragment_shader_module = unsafe {
+            self.handle()
+                .create_shader_module(&fragment_shader_module_create_info, None)
+        }
+        .unwrap();
+
+        let push_constant_ranges = if info.push_constant_size > 0 {
+            vec![vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::ALL_GRAPHICS)
+                .offset(0)
+                .size(info.push_constant_size)]
+        } else {
+            vec![]
+        };
+
+        let set_layouts = [self.gpu_resources.bindless_descriptor_set_layout];
+        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo::default()
+            .push_constant_ranges(&push_constant_ranges)
+            .set_layouts(&set_layouts);
+
+        let pipeline_layout = unsafe {
+            self.handle()
+                .create_pipeline_layout(&pipeline_layout_create_info, None)
+        }
+        .unwrap();
+
+        let vertex_shader_entry_cstring =
+            std::ffi::CString::new(info.vertex_shader.entry_point.as_str())
+                .expect("Failed to convert entry point to CString");
+        let fragment_shader_entry_cstring =
+            std::ffi::CString::new(info.fragment_shader.entry_point.as_str())
+                .expect("Failed to convert entry point to CString");
+        let color_attachment_formats = info
+            .color_attachments
+            .iter()
+            .map(|format| format.clone().into())
+            .collect::<Vec<_>>();
+        let mut pipeline_rendering_create_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_attachment_formats);
+
+        let shader_stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vertex_shader_module)
+                .name(&vertex_shader_entry_cstring),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(fragment_shader_module)
+                .name(&fragment_shader_entry_cstring),
+        ];
+
+        let rasterization_create_info = vk::PipelineRasterizationStateCreateInfo::default()
+            .polygon_mode(info.polygon_mode.into())
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .line_width(info.line_width);
+
+        let blend_attachment_states = [vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(
+                vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+            )
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .alpha_blend_op(vk::BlendOp::ADD)];
+
+        let color_blend_create_info =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachment_states);
+
+        let viewports = [vk::Viewport::default()
+            .width(1.0)
+            .height(1.0)
+            .max_depth(1.0)];
+        let scissors = [vk::Rect2D::default().extent(vk::Extent2D::default().width(1).height(1))];
+
+        let viewport_create_info = vk::PipelineViewportStateCreateInfo::default()
+            .scissors(&scissors)
+            .viewports(&viewports);
+
+        let multisample_create_info = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state_create_info =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+        let mut vertex_attr_infos = Vec::new();
+        let mut stride = 0;
+        for vertex_attr_type in info.vertex_attributes {
+            vertex_attr_infos.push(
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(vertex_attr_infos.len() as u32)
+                    .offset(stride)
+                    .format(vertex_attr_type.vk_format()),
+            );
+            stride += vertex_attr_type.size();
         }
 
-        for buffer_id in self
-            .deferred_destruct_buffers
-            .get_mut(&gpu_count)
-            .unwrap_or(&mut Vec::new())
-            .drain(0..)
-            .collect::<Vec<_>>()
-        {
-            self.destroy_buffer(buffer_id);
+        let vertex_binding_info = vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(stride);
+
+        let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_binding_descriptions(std::slice::from_ref(&vertex_binding_info))
+            .vertex_attribute_descriptions(&vertex_attr_infos);
+
+        let input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(info.topology.into())
+            .primitive_restart_enable(info.primitive_restart_enable);
+
+        let create_infos = [vk::GraphicsPipelineCreateInfo::default()
+            .push_next(&mut pipeline_rendering_create_info)
+            .stages(&shader_stages)
+            .rasterization_state(&rasterization_create_info)
+            .color_blend_state(&color_blend_create_info)
+            .multisample_state(&multisample_create_info)
+            .input_assembly_state(&input_assembly_create_info)
+            .viewport_state(&viewport_create_info)
+            .dynamic_state(&dynamic_state_create_info)
+            .vertex_input_state(&vertex_input_state_create_info)
+            .layout(pipeline_layout)];
+
+        let pipeline = unsafe {
+            self.handle()
+                .create_graphics_pipelines(vk::PipelineCache::null(), &create_infos, None)
+        }
+        .unwrap()[0];
+
+        unsafe {
+            self.handle()
+                .destroy_shader_module(vertex_shader_module, None);
+            self.handle()
+                .destroy_shader_module(fragment_shader_module, None);
+        }
+
+        RasterPipeline {
+            inner: PipelineInner {
+                device_dep: self.create_dep(),
+                pipeline,
+                pipeline_layout,
+            },
         }
     }
 
@@ -399,8 +609,8 @@ impl Device {
         }
 
         ComputePipeline {
-            device_dep: self.create_dep(),
             inner: PipelineInner {
+                device_dep: self.create_dep(),
                 pipeline,
                 pipeline_layout,
             },

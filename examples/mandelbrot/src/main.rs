@@ -54,7 +54,9 @@ fn main() {
     let shader_compiler = ShaderCompiler::new();
     let compute_pipeline = device.create_compute_pipeline(ComputePipelineInfo {
         shader: ShaderInfo {
-            byte_code: shader_compiler.load_from_file("shaders/mandelbrot.comp.glsl".to_owned()),
+            byte_code: shader_compiler
+                .load_from_file("shaders/mandelbrot.comp.glsl".to_owned())
+                .expect("Failed to load shader."),
             entry_point: "main".to_owned(),
         },
         push_constant_size: std::mem::size_of::<PushConstants>() as u32,

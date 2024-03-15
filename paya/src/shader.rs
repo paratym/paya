@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    error::Error,
     path::PathBuf,
 };
 
@@ -38,6 +39,12 @@ pub struct ShaderLoadOptions {
     name: String,
 }
 
+#[derive(Debug)]
+pub enum CompilationError {
+    CompilationErrors { message: String },
+    Undefined { message: String },
+}
+
 impl ShaderCompiler {
     pub fn new() -> Self {
         Self {
@@ -45,7 +52,11 @@ impl ShaderCompiler {
         }
     }
 
-    pub fn load_string(&self, shader_source: String, load_options: ShaderLoadOptions) -> Vec<u32> {
+    pub fn load_string(
+        &self,
+        shader_source: String,
+        load_options: ShaderLoadOptions,
+    ) -> Result<Vec<u32>, CompilationError> {
         let shader_kind = match load_options.shader_type {
             ShaderType::Compute => shaderc::ShaderKind::Compute,
             ShaderType::Vertex => shaderc::ShaderKind::Vertex,
@@ -71,16 +82,24 @@ impl ShaderCompiler {
             Some(&options),
         );
 
-        if code_result.is_err() {
-            println!("{}", code_result.err().unwrap());
-            panic!();
+        if let Err(error) = code_result {
+            match error {
+                shaderc::Error::CompilationError(num_errors, errors) => {
+                    return Err(CompilationError::CompilationErrors { message: errors })
+                }
+                _ => {
+                    return Err(CompilationError::Undefined {
+                        message: error.to_string(),
+                    });
+                }
+            }
         }
 
-        code_result.unwrap().as_binary().into()
+        Ok(code_result.unwrap().as_binary().into())
     }
 
     /// Loads the glsl file and parses includes with relative paths.
-    pub fn load_from_file(&self, file_path: String) -> Vec<u32> {
+    pub fn load_from_file(&self, file_path: String) -> Result<Vec<u32>, CompilationError> {
         let root_path = PathBuf::from(file_path.clone());
         let root_path_string = root_path.as_os_str().to_owned().into_string().unwrap();
         let include_regex = Regex::new(r##"#include "([^\"]*\/)*[^"]+""##).unwrap();

@@ -3,10 +3,13 @@ use std::{collections::HashSet, sync::Arc};
 use ash::vk;
 
 use crate::{
-    common::{BufferTransition, ImageTransition},
+    common::{
+        AttachmentLoadOp, AttachmentStoreOp, BufferTransition, ClearValue, Extent2D, ImageLayout,
+        ImageTransition,
+    },
     device::{Device, DeviceInner},
     gpu_resources::{BufferId, ImageId},
-    pipeline::ComputePipeline,
+    pipeline::{ComputePipeline, Pipeline, RasterPipeline},
 };
 
 #[derive(Clone)]
@@ -202,7 +205,9 @@ impl CommandRecorder {
         &mut self,
         device: &Device,
         src: BufferId,
+        src_offset: u64,
         dst: BufferId,
+        dst_offset: u64,
         size: u64,
     ) {
         let src_buffer = device.get_buffer(src);
@@ -213,7 +218,10 @@ impl CommandRecorder {
                 self.current_command_list.handle(),
                 src_buffer.handle,
                 dst_buffer.handle,
-                &[vk::BufferCopy::default().size(size)],
+                &[vk::BufferCopy::default()
+                    .size(size)
+                    .src_offset(src_offset)
+                    .dst_offset(dst_offset)],
             )
         }
     }
@@ -345,18 +353,144 @@ impl CommandRecorder {
         }
     }
 
-    pub fn upload_push_constants<T>(
-        &mut self,
-        device: &Device,
-        pipeline: &ComputePipeline,
-        data: &T,
-    ) {
+    pub fn bind_graphics_pipeline(&mut self, device: &Device, pipeline: &RasterPipeline) {
+        unsafe {
+            device.handle().cmd_bind_pipeline(
+                self.current_command_list.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.inner.pipeline,
+            );
+            device.handle().cmd_bind_descriptor_sets(
+                self.current_command_list.command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline.inner.pipeline_layout,
+                0,
+                &[device.gpu_resources.descriptor_set],
+                &[],
+            );
+        }
+    }
+
+    pub fn begin_rendering(&mut self, device: &Device, info: &BeginRenderingInfo) {
+        let color_attachments = info
+            .color_attachments
+            .iter()
+            .map(|info| {
+                let image_info = device.get_image(info.image);
+
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(
+                        image_info
+                            .view
+                            .expect("Image doesnt have color attachment usage applied."),
+                    )
+                    .load_op(info.load_op.clone().into())
+                    .store_op(info.store_op.clone().into())
+                    .clear_value(info.clear_value.clone().into())
+                    .image_layout(info.layout.into())
+            })
+            .collect::<Vec<_>>();
+
+        let rendering_info = vk::RenderingInfo::default()
+            .render_area(
+                vk::Rect2D::default()
+                    .offset(vk::Offset2D::default())
+                    .extent(info.render_area.into()),
+            )
+            .color_attachments(&color_attachments)
+            .layer_count(1)
+            .view_mask(0);
+
+        unsafe {
+            device
+                .inner()
+                .dynamic_rendering_loader
+                .cmd_begin_rendering(self.current_command_list.command_buffer, &rendering_info)
+        };
+    }
+
+    pub fn end_rendering(&mut self, device: &Device) {
+        unsafe {
+            device
+                .inner()
+                .dynamic_rendering_loader
+                .cmd_end_rendering(self.current_command_list.command_buffer);
+        }
+    }
+
+    pub fn set_scissor(&mut self, device: &Device, extent: Extent2D) {
+        let scissor = vk::Rect2D::default()
+            .offset(vk::Offset2D::default())
+            .extent(extent.into());
+
+        unsafe {
+            device.handle().cmd_set_scissor(
+                self.current_command_list.command_buffer,
+                0,
+                &[scissor],
+            );
+        }
+    }
+
+    pub fn set_viewport(&mut self, device: &Device, extent: Extent2D) {
+        let viewport = vk::Viewport::default()
+            .width(extent.width as f32)
+            .height(extent.height as f32)
+            .max_depth(1.0);
+
+        unsafe {
+            device.handle().cmd_set_viewport(
+                self.current_command_list.command_buffer,
+                0,
+                &[viewport],
+            );
+        }
+    }
+
+    pub fn set_index_buffer(&mut self, device: &Device, buffer: BufferId) {
+        let buffer = device.get_buffer(buffer);
+        unsafe {
+            device.handle().cmd_bind_index_buffer(
+                self.current_command_list.command_buffer,
+                buffer.handle,
+                0,
+                vk::IndexType::UINT32,
+            );
+        }
+    }
+
+    pub fn set_vertex_buffer(&mut self, device: &Device, buffer: BufferId) {
+        let buffer = device.get_buffer(buffer);
+        unsafe {
+            device.handle().cmd_bind_vertex_buffers(
+                self.current_command_list.command_buffer,
+                0,
+                &[buffer.handle],
+                &[0],
+            );
+        }
+    }
+
+    pub fn draw_indexed(&mut self, device: &Device, index_count: u32) {
+        unsafe {
+            device.handle().cmd_draw_indexed(
+                self.current_command_list.command_buffer,
+                index_count,
+                1,
+                0,
+                0,
+                0,
+            );
+        }
+    }
+
+    pub fn upload_push_constants<T>(&mut self, device: &Device, pipeline: &dyn Pipeline, data: &T) {
         let data = std::slice::from_ref(data);
         unsafe {
             device.handle().cmd_push_constants(
                 self.current_command_list.command_buffer,
-                pipeline.inner.pipeline_layout,
-                vk::ShaderStageFlags::COMPUTE,
+                pipeline.inner().pipeline_layout,
+                pipeline.shader_stages(),
                 0,
                 std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)),
             );
@@ -381,4 +515,17 @@ impl CommandRecorder {
 
         self.current_command_list
     }
+}
+
+pub struct RenderingAttachment {
+    pub image: ImageId,
+    pub layout: ImageLayout,
+    pub load_op: AttachmentLoadOp,
+    pub store_op: AttachmentStoreOp,
+    pub clear_value: ClearValue,
+}
+
+pub struct BeginRenderingInfo {
+    pub render_area: Extent2D,
+    pub color_attachments: Vec<RenderingAttachment>,
 }
