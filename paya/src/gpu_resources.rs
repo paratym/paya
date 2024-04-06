@@ -1,9 +1,9 @@
-use std::{ffi::CString, sync::Arc};
+use std::{ffi::CString, sync::Arc, time::Instant};
 
 use ash::vk::{self};
 
 use crate::{
-    allocator::{Allocation, GpuAllocator, MemoryFlags},
+    allocator::{Allocation, GpuAllocator, MemoryFlags, MemoryLocation, MemoryType},
     common::{BufferUsageFlags, ImageUsageFlags},
     device::{DeviceInner, Image, ImageInfo},
 };
@@ -179,7 +179,7 @@ pub struct GpuResourcePool {
 
     pub(crate) bindless_descriptor_set_layout: vk::DescriptorSetLayout,
     pub(crate) descriptor_set: vk::DescriptorSet,
-    buffer_addresses_buffer: Buffer,
+    buffer_addresses_buffer: Option<Buffer>,
     buffer_addresses_buffer_ptr: BufferAddressPtr,
 
     images: ResourceSlot<Image>,
@@ -210,7 +210,7 @@ impl GpuResourcePool {
             let info = BufferInfo {
                 name: "paya_buffer_addresses_buffer".to_owned(),
                 size: MAX_BUFFERS * std::mem::size_of::<u64>() as u64,
-                memory_flags: MemoryFlags::DEVICE_LOCAL | MemoryFlags::HOST_VISIBLE,
+                memory_location: MemoryLocation::CpuToGpu,
                 usage: BufferUsageFlags::STORAGE,
             };
             let create_info = vk::BufferCreateInfo::default()
@@ -225,15 +225,19 @@ impl GpuResourcePool {
                 unsafe { device_dep.device.get_buffer_memory_requirements(buffer) };
 
             let allocation = allocator.allocate_memory(
+                info.name.clone(),
+                true,
+                info.memory_location,
+                MemoryType::DedicatedBuffer(buffer),
                 memory_requirements,
-                info.memory_flags,
-                vk::MemoryAllocateFlags::empty(),
             );
 
             unsafe {
-                device_dep
-                    .device
-                    .bind_buffer_memory(buffer, allocation.memory, allocation.offset)
+                device_dep.device.bind_buffer_memory(
+                    buffer,
+                    allocation.memory(),
+                    allocation.offset(),
+                )
             }
             .expect("failed to bind memory to buffer");
 
@@ -248,7 +252,7 @@ impl GpuResourcePool {
 
         let buffer_addresses_buffer_ptr = unsafe {
             device_dep.device.map_memory(
-                buffer_addresses_buffer.allocation.memory,
+                buffer_addresses_buffer.allocation.memory(),
                 0,
                 buffer_addresses_buffer.info.size,
                 vk::MemoryMapFlags::empty(),
@@ -278,7 +282,7 @@ impl GpuResourcePool {
             descriptor_pool,
             bindless_descriptor_set_layout: descriptor_set_layout,
             descriptor_set,
-            buffer_addresses_buffer,
+            buffer_addresses_buffer: Some(buffer_addresses_buffer),
             buffer_addresses_buffer_ptr: BufferAddressPtr(buffer_addresses_buffer_ptr),
             images: ResourceSlot::new(),
             buffers: ResourceSlot::new(),
@@ -381,16 +385,18 @@ impl GpuResourcePool {
             let memory_requirements =
                 unsafe { self.device_dep.device.get_image_memory_requirements(handle) };
             let allocation = self.allocator.allocate_memory(
+                "image",
+                false,
+                MemoryLocation::GpuOnly,
+                MemoryType::DedicatedImage(handle),
                 memory_requirements,
-                MemoryFlags::DEVICE_LOCAL,
-                vk::MemoryAllocateFlags::empty(),
             );
 
             unsafe {
                 self.device_dep.device.bind_image_memory(
                     handle,
-                    allocation.memory,
-                    allocation.offset,
+                    allocation.memory(),
+                    allocation.offset(),
                 )
             }
             .expect("Failed to bind image memory");
@@ -473,7 +479,7 @@ impl GpuResourcePool {
         if !image.is_swapchain_image {
             unsafe { self.device_dep.device.destroy_image(image.handle, None) };
         }
-        if let Some(allocation) = image.allocation.clone() {
+        if let Some(allocation) = image.allocation {
             self.allocator.deallocate_memory(allocation);
         }
     }
@@ -497,9 +503,8 @@ impl GpuResourcePool {
         unsafe {
             let _ = self
                 .device_dep
-                .instance_dep
                 .debug_utils
-                .set_debug_utils_object_name(self.device_dep.device.handle(), &name_info);
+                .set_debug_utils_object_name(&name_info);
         }
 
         let memory_requirements = unsafe {
@@ -509,15 +514,19 @@ impl GpuResourcePool {
         };
 
         let allocation = self.allocator.allocate_memory(
+            info.name.clone(),
+            true,
+            info.memory_location,
+            MemoryType::Managed,
             memory_requirements,
-            info.memory_flags,
-            vk::MemoryAllocateFlags::DEVICE_ADDRESS,
         );
 
         unsafe {
-            self.device_dep
-                .device
-                .bind_buffer_memory(buffer, allocation.memory, allocation.offset)
+            self.device_dep.device.bind_buffer_memory(
+                buffer,
+                allocation.memory(),
+                allocation.offset(),
+            )
         }
         .expect("failed to bind memory to buffer");
 
@@ -565,7 +574,9 @@ impl Drop for GpuResourcePool {
         for buffer in self.buffers.collect_existing() {
             self.destroy_buffer_raw(buffer);
         }
-        self.destroy_buffer_raw(self.buffer_addresses_buffer.clone());
+        if let Some(buffer_addresses_buffer) = self.buffer_addresses_buffer.take() {
+            self.destroy_buffer_raw(buffer_addresses_buffer);
+        }
 
         unsafe {
             self.device_dep
@@ -584,11 +595,10 @@ impl Drop for GpuResourcePool {
 pub struct BufferInfo {
     pub name: String,
     pub size: u64,
-    pub memory_flags: MemoryFlags,
+    pub memory_location: MemoryLocation,
     pub usage: BufferUsageFlags,
 }
 
-#[derive(Clone)]
 pub struct Buffer {
     pub handle: vk::Buffer,
     pub offset: vk::DeviceSize,

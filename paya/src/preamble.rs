@@ -1,6 +1,8 @@
 pub const SHADER_PREAMBLE_GLSL: &str = "\
 #version 450
 
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int32 : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
 #extension GL_EXT_buffer_reference : enable
@@ -17,6 +19,7 @@ struct ResourceId {
 
 #define DECL_PUSH_CONSTANTS layout(push_constant) uniform PushConstants
 #define DECL_BUFFER(alignment) layout(std430, buffer_reference, buffer_reference_align = alignment) buffer
+#define DECL_BUFFER_COHERENT(alignment) layout(std430, buffer_reference, buffer_reference_align = alignment) coherent buffer
 
 #define get_buffer(id, type) type(u_addresses.addresses[id.index]);
 #define get_storage_image(id) u_images[id.index]

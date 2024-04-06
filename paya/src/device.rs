@@ -4,10 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use ash::{
-    extensions::khr::{self, DynamicRendering},
-    vk,
-};
+use ash::vk;
 use slotmap::{new_key_type, SlotMap};
 
 use crate::{
@@ -60,7 +57,8 @@ pub struct DeviceInner {
     pub(crate) physical_device: vk::PhysicalDevice,
     pub(crate) physical_device_properties: vk::PhysicalDeviceProperties,
     pub(crate) physical_device_memory_properties: vk::PhysicalDeviceMemoryProperties,
-    pub(crate) dynamic_rendering_loader: DynamicRendering,
+    pub(crate) dynamic_rendering_loader: ash::khr::dynamic_rendering::Device,
+    pub(crate) debug_utils: ash::ext::debug_utils::Device,
 }
 
 pub struct Device {
@@ -122,8 +120,8 @@ impl Device {
         let shader_non_semantic_info_c_string =
             CString::new("VK_KHR_shader_non_semantic_info").unwrap();
         let device_extensions = vec![
-            ash::extensions::khr::Swapchain::NAME.as_ptr(),
-            ash::extensions::khr::DynamicRendering::NAME.as_ptr(),
+            ash::khr::swapchain::NAME.as_ptr(),
+            ash::khr::dynamic_rendering::NAME.as_ptr(),
             shader_non_semantic_info_c_string.as_ptr(),
         ];
 
@@ -163,7 +161,10 @@ impl Device {
                 .expect("Failed to create logical device")
         };
 
-        let dynamic_rendering_loader = DynamicRendering::new(unsafe { instance.handle() }, &device);
+        let dynamic_rendering_loader =
+            ash::khr::dynamic_rendering::Device::new(unsafe { instance.handle() }, &device);
+
+        let debug_utils = ash::ext::debug_utils::Device::new(unsafe { instance.handle() }, &device);
 
         let main_queue = unsafe { device.get_device_queue(0, 0) };
         let main_queue_family_index = 0;
@@ -176,6 +177,7 @@ impl Device {
             physical_device_properties,
             physical_device_memory_properties,
             dynamic_rendering_loader,
+            debug_utils,
         };
 
         let deferred_destruct_recorders = HashMap::new();
@@ -245,23 +247,14 @@ impl Device {
             .push(id);
     }
 
-    pub fn map_buffer_typed<T>(&self, id: BufferId) -> TypedMappedPtr<'_, T> {
+    pub fn map_buffer_typed<T>(&self, id: BufferId) -> *mut T {
         let buffer = self.gpu_resources.get_buffer(id);
-        let ptr = unsafe {
-            self.handle().map_memory(
-                buffer.allocation.memory,
-                buffer.allocation.offset,
-                buffer.size,
-                vk::MemoryMapFlags::empty(),
-            )
-        }
-        .expect("Failed to map typed buf memory");
-
-        TypedMappedPtr {
-            ptr: ptr as *mut T,
-            device: self,
-            memory: buffer.allocation.memory,
-        }
+        buffer
+            .allocation
+            .allocation
+            .mapped_ptr()
+            .expect("Could not map buffer")
+            .as_ptr() as *mut T
     }
 
     pub fn create_command_recorder(&mut self) -> CommandRecorder {
@@ -788,40 +781,57 @@ pub struct PresentInfo<'a> {
     pub wait_semaphores: Vec<&'a BinarySemaphore>,
 }
 
-pub struct TypedMappedPtr<'a, T> {
+pub struct MappedPtr<'a, T> {
     ptr: *mut T,
+    did_unmap: bool,
     memory: vk::DeviceMemory,
     device: &'a Device,
 }
 
-impl<T> std::ops::Deref for TypedMappedPtr<'_, T> {
+impl<T> std::ops::Deref for MappedPtr<'_, T> {
     type Target = *mut T;
     fn deref(&self) -> &Self::Target {
         &self.ptr
     }
 }
 
-impl<T> Drop for TypedMappedPtr<'_, T> {
-    fn drop(&mut self) {
-        unsafe { self.device.handle().unmap_memory(self.memory) };
+impl<'a, T> MappedPtr<'a, T> {
+    pub(crate) fn new(
+        device: &'a Device,
+        memory: vk::DeviceMemory,
+        offset: u64,
+        size: u64,
+    ) -> Self {
+        let ptr = unsafe {
+            device
+                .handle()
+                .map_memory(memory, offset, size, vk::MemoryMapFlags::empty())
+        }
+        .expect("Failed to map memory") as *mut T;
+
+        MappedPtr {
+            ptr,
+            did_unmap: false,
+            memory,
+            device,
+        }
+    }
+
+    pub fn unmap(&mut self) {
+        if !self.did_unmap {
+            unsafe {
+                self.device.handle().unmap_memory(self.memory);
+            }
+            self.did_unmap = true;
+        }
     }
 }
 
-pub struct MappedPtr<'a> {
-    ptr: *mut u8,
-    memory: vk::DeviceMemory,
-    device: &'a Device,
-}
-
-impl std::ops::Deref for MappedPtr<'_> {
-    type Target = *mut u8;
-    fn deref(&self) -> &Self::Target {
-        &self.ptr
-    }
-}
-
-impl Drop for MappedPtr<'_> {
+impl<T> Drop for MappedPtr<'_, T> {
     fn drop(&mut self) {
-        unsafe { self.device.handle().unmap_memory(self.memory) };
+        assert!(
+            self.did_unmap,
+            "Memory pointer was dropped before being unmapped.."
+        );
     }
 }

@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use ash::{extensions::khr, vk};
+use ash::vk;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::{
@@ -35,9 +35,9 @@ pub struct SwapchainInfo {
 
 pub struct Swapchain {
     device_dep: Arc<DeviceInner>,
-    swapchain_loader: khr::Swapchain,
+    swapchain_loader: ash::khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
-    surface_loader: khr::Surface,
+    surface_loader: ash::khr::surface::Instance,
     surface: vk::SurfaceKHR,
     images: Vec<ImageId>,
     info: SwapchainInfo,
@@ -52,21 +52,28 @@ pub struct Swapchain {
 
 impl Swapchain {
     pub(crate) fn new(device: &mut Device, create_info: SwapchainCreateInfo<'_>) -> Self {
-        let surface_loader =
-            khr::Surface::new(&device.instance().loader, &device.instance().instance);
+        let surface_loader = ash::khr::surface::Instance::new(
+            &device.instance().loader,
+            &device.instance().instance,
+        );
 
         let surface = unsafe {
             ash_window::create_surface(
                 &device.instance().loader,
                 &device.instance().instance,
-                create_info.display_handle.display_handle().unwrap(),
-                create_info.window_handle.window_handle().unwrap(),
+                create_info
+                    .display_handle
+                    .display_handle()
+                    .unwrap()
+                    .as_raw(),
+                create_info.window_handle.window_handle().unwrap().as_raw(),
                 None,
             )
         }
         .unwrap();
 
-        let swapchain_loader = khr::Swapchain::new(&device.instance().instance, device.handle());
+        let swapchain_loader =
+            ash::khr::swapchain::Device::new(&device.instance().instance, device.handle());
 
         let (swapchain, images, info) = Self::create_swapchain(
             device.inner(),
@@ -123,10 +130,10 @@ impl Swapchain {
 
     fn create_swapchain(
         device_inner: &DeviceInner,
-        swapchain_loader: &khr::Swapchain,
+        swapchain_loader: &ash::khr::swapchain::Device,
         info: InternalSwapchainKHRCreateInfo,
     ) -> (vk::SwapchainKHR, Vec<vk::Image>, SwapchainInfo) {
-        let surface_loader = khr::Surface::new(
+        let surface_loader = ash::khr::surface::Instance::new(
             &device_inner.instance_dep.loader,
             &device_inner.instance_dep.instance,
         );
@@ -162,10 +169,12 @@ impl Swapchain {
             })
             .unwrap_or(&surface_formats[0]);
 
+        println!("Surface present_modes: {:?}", surface_present_modes);
         let present_mode = surface_present_modes
             .iter()
             .find(|&present_mode| *present_mode == vk::PresentModeKHR::MAILBOX)
             .unwrap_or(&vk::PresentModeKHR::FIFO);
+        println!("Present mode: {:?}", present_mode);
 
         let extent = info.preferred_extent;
 
@@ -256,7 +265,7 @@ impl Swapchain {
         self.swapchain
     }
 
-    pub(crate) fn loader(&self) -> &khr::Swapchain {
+    pub(crate) fn loader(&self) -> &ash::khr::swapchain::Device {
         &self.swapchain_loader
     }
 
@@ -266,11 +275,6 @@ impl Swapchain {
                 .device
                 .get_semaphore_counter_value(self.gpu_timeline_semaphore.handle())
         };
-
-        // println!(
-        //     "CPU is {} frames ahead of GPU",
-        //   self.cpu_timeline - gpu_index.unwrap()
-        //);
 
         let acquire_semaphore = &self.acquire_image_semaphores
             [((self.cpu_timeline + 1) % self.info.max_frames_in_flight as u64) as usize];
@@ -304,6 +308,10 @@ impl Swapchain {
     pub fn current_present_semaphore(&self) -> &BinarySemaphore {
         &self.acquire_image_semaphores
             [(self.cpu_timeline % self.info.max_frames_in_flight as u64) as usize]
+    }
+
+    pub fn cpu_timeline(&self) -> u64 {
+        self.cpu_timeline
     }
 
     pub fn gpu_timeline_semaphore(&self) -> &TimelineSemaphore {

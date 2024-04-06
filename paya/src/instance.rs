@@ -10,7 +10,7 @@ pub struct InstanceCreateInfo<'a> {
 pub struct InstanceInner {
     pub(crate) loader: ash::Entry,
     pub(crate) instance: ash::Instance,
-    pub(crate) debug_utils: ash::extensions::ext::DebugUtils,
+    pub(crate) debug_utils: ash::ext::debug_utils::Instance,
     debug_utils_messenger: vk::DebugUtilsMessengerEXT,
 }
 
@@ -32,7 +32,7 @@ impl Instance {
 
         let c_instance_extensions = vec![
             #[cfg(debug_assertions)]
-            ash::extensions::ext::DebugUtils::NAME.to_owned(),
+            ash::ext::debug_utils::NAME.as_ref(),
         ];
 
         let c_instance_layers = vec![
@@ -51,8 +51,10 @@ impl Instance {
 
         if let Some(display_handle) = create_info.display_handle {
             c_ptr_instance_extensions.extend(
-                ash_window::enumerate_required_extensions(display_handle.display_handle().unwrap())
-                    .unwrap(),
+                ash_window::enumerate_required_extensions(
+                    display_handle.display_handle().unwrap().as_raw(),
+                )
+                .unwrap(),
             );
         }
 
@@ -63,7 +65,7 @@ impl Instance {
 
         let instance = unsafe { loader.create_instance(&instance_create_info, None).unwrap() };
 
-        let debug_utils = ash::extensions::ext::DebugUtils::new(&loader, &instance);
+        let debug_utils = ash::ext::debug_utils::Instance::new(&loader, &instance);
         let debug_utils_create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
             .message_severity(
                 vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
