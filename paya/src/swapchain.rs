@@ -14,6 +14,7 @@ pub struct SwapchainCreateInfo<'a> {
     pub window_handle: &'a dyn HasWindowHandle,
     pub display_handle: &'a dyn HasDisplayHandle,
     pub preferred_extent: (u32, u32),
+    pub preferred_image_count: u32,
     pub image_usage: ImageUsageFlags,
     pub max_frames_in_flight: u32,
 }
@@ -22,6 +23,7 @@ struct InternalSwapchainKHRCreateInfo {
     surface: vk::SurfaceKHR,
     old_swapchain: Option<vk::SwapchainKHR>,
     preferred_extent: vk::Extent2D,
+    preferred_image_count: u32,
     image_usage: ImageUsageFlags,
     max_frames_in_flight: u32,
 }
@@ -30,6 +32,7 @@ pub struct SwapchainInfo {
     pub format: Format,
     pub extent: Extent2D,
     pub image_usage: ImageUsageFlags,
+    pub image_count: u32,
     pub max_frames_in_flight: u32,
 }
 
@@ -85,6 +88,7 @@ impl Swapchain {
                     width: create_info.preferred_extent.0,
                     height: create_info.preferred_extent.1,
                 },
+                preferred_image_count: create_info.preferred_image_count,
                 image_usage: create_info.image_usage,
                 max_frames_in_flight: create_info.max_frames_in_flight,
             },
@@ -178,7 +182,13 @@ impl Swapchain {
 
         let extent = info.preferred_extent;
 
-        let image_count = u32::max(surface_capabilities.min_image_count, 2);
+        let image_count = u32::max(
+            surface_capabilities.min_image_count,
+            u32::min(
+                info.preferred_image_count,
+                surface_capabilities.max_image_count,
+            ),
+        );
 
         let mut swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(info.surface)
@@ -220,6 +230,7 @@ impl Swapchain {
                 format: Format::from(surface_format.format),
                 extent: Extent2D::new(extent.width, extent.height),
                 image_usage: info.image_usage,
+                image_count,
                 max_frames_in_flight: info.max_frames_in_flight,
             },
         )
@@ -233,6 +244,7 @@ impl Swapchain {
                 surface: self.surface,
                 old_swapchain: Some(self.swapchain),
                 preferred_extent: vk::Extent2D { width, height },
+                preferred_image_count: self.info.image_count,
                 image_usage: self.info.image_usage,
                 max_frames_in_flight: self.info.max_frames_in_flight,
             },

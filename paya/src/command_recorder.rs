@@ -226,6 +226,31 @@ impl CommandRecorder {
         }
     }
 
+    pub fn copy_buffer_to_buffer_multiple(
+        &mut self,
+        device: &Device,
+        src: BufferId,
+        dst: BufferId,
+        regions: Vec<CopyRegion>,
+    ) {
+        let src_buffer = device.get_buffer(src);
+        let dst_buffer = device.get_buffer(dst);
+
+        let vk_regions = regions
+            .into_iter()
+            .map(|region| region.into())
+            .collect::<Vec<vk::BufferCopy>>();
+
+        unsafe {
+            device.handle().cmd_copy_buffer(
+                self.current_command_list.handle(),
+                src_buffer.handle,
+                dst_buffer.handle,
+                &vk_regions,
+            )
+        }
+    }
+
     pub fn blit_image_to_image(&mut self, device: &Device, src: ImageId, dst: ImageId) {
         let src_image = device.get_image(src);
         let dst_image = device.get_image(dst);
@@ -528,4 +553,19 @@ pub struct RenderingAttachment {
 pub struct BeginRenderingInfo {
     pub render_area: Extent2D,
     pub color_attachments: Vec<RenderingAttachment>,
+}
+
+pub struct CopyRegion {
+    pub src_offset: u64,
+    pub dst_offset: u64,
+    pub size: u64,
+}
+
+impl Into<vk::BufferCopy> for CopyRegion {
+    fn into(self) -> vk::BufferCopy {
+        vk::BufferCopy::default()
+            .size(self.size)
+            .src_offset(self.src_offset)
+            .dst_offset(self.dst_offset)
+    }
 }
